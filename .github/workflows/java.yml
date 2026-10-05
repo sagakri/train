@@ -1,0 +1,38 @@
+name: Java build and tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Compile and package
+        run: |
+          mkdir -p out dist
+          javac --release 17 -encoding UTF-8 -d out src/train/*.java
+          jar --create --file dist/train-simulator.jar --main-class train.Main -C out .
+
+      - name: Algorithm tests
+        run: java -Dfile.encoding=UTF-8 -cp out train.SelfTest
+
+      - name: Swing tests
+        run: xvfb-run -a java -Dfile.encoding=UTF-8 -cp out train.UiSelfTest
+
+      - name: Console demo
+        run: java -Dfile.encoding=UTF-8 -jar dist/train-simulator.jar --demo

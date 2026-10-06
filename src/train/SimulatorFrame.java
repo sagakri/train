@@ -17,7 +17,7 @@ public final class SimulatorFrame extends JFrame {
         @Override public boolean isCellEditable(int row, int col) { return col > 0; }
         @Override public Class<?> getColumnClass(int col) { return col == 2 ? Boolean.class : Object.class; }
     };
-    private final DefaultTableModel trains = new DefaultTableModel(new Object[]{"№", "От", "До", "км/ч", "Вагоны", "Цистерны", "Отправление", "Маршрут (пусто = кратчайший)"}, 0) {
+    private final DefaultTableModel trains = new DefaultTableModel(new Object[]{"№", "От", "До", "км/ч", "Вагоны", "Цистерны", "Отправление", "Маршрут", "Выбор маршрута"}, 0) {
         @Override public boolean isCellEditable(int row, int col) { return col > 0; }
     };
     private final DefaultTableModel events = readOnly("Поезд", "Ресурс", "Событие", "Голова / начало", "Хвост / конец");
@@ -30,6 +30,7 @@ public final class SimulatorFrame extends JFrame {
     private final JComboBox<String> variants = new JComboBox<>();
     private final JButton auto = new JButton("Найти лучший график"), manual = new JButton("Проверить отправления"), cancel = new JButton("Отменить");
     private final JButton random = new JButton("Случайные данные"), defaults = new JButton("Исходные данные");
+    private final JButton reverse = new JButton("Поменять направление выбранного поезда");
     private final JLabel status = new JLabel("Готов к расчёту"), metrics = new JLabel("Освобождение: —"), clock = new JLabel("00:00:00");
     private final JLabel comparison = new JLabel("С вагонами: —   |   Без вагонов: —");
     private final JTextArea messages = new JTextArea(3, 60);
@@ -84,9 +85,21 @@ public final class SimulatorFrame extends JFrame {
 
         trainTable.setRowHeight(28);
         trainTable.getColumnModel().getColumn(7).setPreferredWidth(270);
-        for (int col : new int[]{1, 2}) trainTable.getColumnModel().getColumn(col).setCellEditor(new DefaultCellEditor(new JComboBox<>(NODES.toArray(String[]::new))));
+        trainTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        // #Редактирование: выбор станций и пути доступен одним щелчком.
+        for (int col : new int[]{1, 2}) {
+            DefaultCellEditor editor = new DefaultCellEditor(new JComboBox<>(NODES.toArray(String[]::new)));
+            editor.setClickCountToStart(1);
+            trainTable.getColumnModel().getColumn(col).setCellEditor(editor);
+        }
+        trainTable.getColumnModel().getColumn(7).setCellEditor(new RouteEditor());
+        trainTable.getColumnModel().getColumn(8).setCellEditor(new DefaultCellEditor(new JComboBox<>(new String[]{"Авто", "Заданный"})));
         JPanel trainPanel = new JPanel(new BorderLayout());
-        trainPanel.setBorder(BorderFactory.createTitledBorder("Поезда: отправления в секундах или ЧЧ:ММ:СС; маршрут через дефис"));
+        trainPanel.setBorder(BorderFactory.createTitledBorder("Поезда: щёлкните «От», «До» или «Маршрут» для выбора"));
+        JPanel directionControls = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        directionControls.add(reverse);
+        directionControls.add(new JLabel("Авто — поиск всех путей; Заданный — расчёт выбранного маршрута."));
+        trainPanel.add(directionControls, BorderLayout.NORTH);
         trainPanel.add(new JScrollPane(trainTable));
         JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("Поезда", trainPanel);
@@ -107,6 +120,7 @@ public final class SimulatorFrame extends JFrame {
         // #Обработчики: каждое действие запускает соответствующую операцию приложения.
         auto.addActionListener(e -> startSearch()); manual.addActionListener(e -> checkManual());
         defaults.addActionListener(e -> loadDefaults()); random.addActionListener(e -> randomize());
+        reverse.addActionListener(e -> reverseDirection());
         cancel.addActionListener(e -> { if (worker != null) worker.cancel(true); });
         variants.addActionListener(e -> {
             if (!updating && variants.getSelectedIndex() >= 0 && variants.getSelectedIndex() < plans.size()) apply(plans.get(variants.getSelectedIndex()));
@@ -114,7 +128,7 @@ public final class SimulatorFrame extends JFrame {
         play.addActionListener(e -> { if (selected != null) { if (animationTime >= selected.total()) showTime(0); timer.start(); } });
         pause.addActionListener(e -> timer.stop()); reset.addActionListener(e -> { timer.stop(); showTime(0); });
         slider.addChangeListener(e -> { if (!updating) { timer.stop(); showTime(slider.getValue()); } });
-        edges.addTableModelListener(e -> invalidateInputs()); trains.addTableModelListener(e -> invalidateInputs());
+        edges.addTableModelListener(e -> invalidateInputs()); trains.addTableModelListener(e -> trainChanged(e));
         withCars.addActionListener(e -> invalidateInputs()); routing.addActionListener(e -> invalidateInputs());
         DocumentListener changes = new DocumentListener() {
             public void insertUpdate(DocumentEvent e) { invalidateInputs(); }
@@ -130,6 +144,73 @@ public final class SimulatorFrame extends JFrame {
 
     private static DefaultTableModel readOnly(String... columns) {
         return new DefaultTableModel(columns, 0) { @Override public boolean isCellEditable(int r, int c) { return false; } };
+    }
+
+    // #СменаСтанций: старый путь не переносится на новое направление.
+    private void trainChanged(TableModelEvent event) {
+        if (updating) return;
+        int row = event.getFirstRow(), column = event.getColumn();
+        if (row >= 0 && row < trains.getRowCount()) {
+            updating = true;
+            if (column == 1 || column == 2) {
+                trains.setValueAt("", row, 7); trains.setValueAt("Авто", row, 8);
+            } else if (column == 7) {
+                trains.setValueAt(text(row, 7).isEmpty() ? "Авто" : "Заданный", row, 8);
+            }
+            updating = false;
+        }
+        invalidateInputs();
+    }
+
+    // #СписокМаршрутов: варианты строятся для текущих станций и включённых участков.
+    private final class RouteEditor extends DefaultCellEditor {
+        private final JComboBox<String> choices;
+        @SuppressWarnings("unchecked")
+        RouteEditor() {
+            super(new JComboBox<String>());
+            choices = (JComboBox<String>) getComponent();
+            choices.setEditable(true); setClickCountToStart(1);
+        }
+        @Override public Component getTableCellEditorComponent(JTable table, Object value, boolean selected, int row, int column) {
+            choices.removeAllItems(); choices.addItem("");
+            try {
+                Network graph = new Network(readConfig(false));
+                for (List<String> route : graph.paths(text(row, 1), text(row, 2))) choices.addItem(String.join("-", route));
+            } catch (IllegalArgumentException ignored) {
+                // #ЧерновыеПараметры: ручной ввод доступен, проверка выполняется при расчёте.
+            }
+            return super.getTableCellEditorComponent(table, value, selected, row, column);
+        }
+    }
+
+    // #Разворот: станции меняются местами; заданный маршрут также разворачивается.
+    private void reverseDirection() {
+        try {
+            readConfig(true);
+            int row = trainTable.getSelectedRow();
+            if (row < 0) throw new IllegalArgumentException("Выберите строку поезда, направление которого нужно изменить.");
+            String from = text(row, 1), to = text(row, 2), route = text(row, 7);
+            boolean fixed = "ЗАДАННЫЙ".equals(text(row, 8));
+            updating = true;
+            trains.setValueAt(to, row, 1); trains.setValueAt(from, row, 2);
+            if (fixed && !route.isEmpty()) {
+                List<String> points = new ArrayList<>(Arrays.asList(route.split("-", -1)));
+                Collections.reverse(points); trains.setValueAt(String.join("-", points), row, 7);
+            } else { trains.setValueAt("", row, 7); trains.setValueAt("Авто", row, 8); }
+            updating = false; invalidateInputs();
+        } catch (IllegalArgumentException e) { updating = false; showError(e); }
+    }
+
+    // #ОграниченияПоиска: только явно заданные маршруты ограничивают автоматический расчёт.
+    private Map<Integer, List<String>> chosenRoutes(Config config) {
+        Network graph = new Network(config);
+        Map<Integer, List<String>> choices = new HashMap<>();
+        for (int row = 0; row < config.trains().size(); row++) if ("ЗАДАННЫЙ".equals(text(row, 8))) {
+            List<String> route = Arrays.stream(text(row, 7).split("-", -1)).map(String::trim).toList();
+            graph.validateRoute(config.trains().get(row), route);
+            choices.put(config.trains().get(row).id(), route);
+        }
+        return Map.copyOf(choices);
     }
 
     // #СбросРезультатов: изменение входных данных исключает показ устаревшего плана.
@@ -177,14 +258,16 @@ public final class SimulatorFrame extends JFrame {
     // #ФоновыйПоиск: SwingWorker выполняет тяжёлые вычисления вне потока интерфейса.
     private void startSearch() {
         try {
-            current = readConfig(true); timer.stop();
+            current = readConfig(true);
+            Map<Integer, List<String>> routeChoices = chosenRoutes(current);
+            timer.stop();
             selected = null; plans = List.of(); savedWaits = List.of();
             updating = true; variants.removeAllItems(); updating = false;
             summary.setRowCount(0); events.setRowCount(0); showTime(0);
             timeline.display(null);
             Config snapshot = current; setBusy(true); progress.setValue(0); status.setText("Поиск безопасных расписаний…");
             worker = new SwingWorker<>() {
-                @Override protected SearchResult doInBackground() { return Optimizer.search(snapshot, this::setProgress); }
+                @Override protected SearchResult doInBackground() { return Optimizer.search(snapshot, routeChoices, this::setProgress); }
                 // #ЗавершениеПоиска: get извлекает результат или ошибку фоновой задачи.
                 @Override protected void done() {
                     try {
@@ -274,7 +357,9 @@ public final class SimulatorFrame extends JFrame {
 
     // #СравнениеРежимов: ключ исключает ручные отправления, но учитывает физические параметры.
     private String comparisonKey() {
-        return current.edges().toString() + current.trains() + current.carLength() + ":" + current.tankLength() + ":" + current.gap() + ":" + current.stops();
+        StringBuilder routes = new StringBuilder();
+        for (int row = 0; row < trains.getRowCount(); row++) if ("ЗАДАННЫЙ".equals(text(row, 8))) routes.append(row).append(':').append(text(row, 7)).append(';');
+        return current.edges().toString() + current.trains() + current.carLength() + ":" + current.tankLength() + ":" + current.gap() + ":" + current.stops() + ":" + routes;
     }
     private void updateComparison() {
         double[] values = comparisons.getOrDefault(comparisonKey(), new double[]{Double.NaN, Double.NaN});
@@ -293,7 +378,7 @@ public final class SimulatorFrame extends JFrame {
 
     // #БлокировкаВвода: параметры не меняются во время вычисления снимка данных.
     private void setBusy(boolean busy) {
-        for (Component c : new Component[]{auto, manual, random, defaults, withCars, routing, variants, edgeTable, trainTable, carLength, tankLength, gap}) c.setEnabled(!busy);
+        for (Component c : new Component[]{auto, manual, random, defaults, reverse, withCars, routing, variants, edgeTable, trainTable, carLength, tankLength, gap}) c.setEnabled(!busy);
         cancel.setEnabled(busy);
     }
 
@@ -307,7 +392,8 @@ public final class SimulatorFrame extends JFrame {
     private void loadDefaults() {
         updating = true; Config config = Model.defaults(); edges.setRowCount(0); trains.setRowCount(0);
         for (Edge edge : config.edges()) edges.addRow(new Object[]{edge.a() + "-" + edge.b(), edge.km(), edge.enabled()});
-        for (Train t : config.trains()) trains.addRow(new Object[]{t.id(), t.from(), t.to(), t.speed(), t.cars(), t.tanks(), "00:00:00", ""});
+        for (Train t : config.trains()) trains.addRow(new Object[]{t.id(), t.from(), t.to(), t.speed(), t.cars(), t.tanks(), "00:00:00", "", "Авто"});
+        trainTable.setRowSelectionInterval(0, 0);
         carLength.setText("20"); tankLength.setText("20"); gap.setText("1"); legend.setText("ц = цистерны, в = вагоны");
         withCars.setSelected(true); routing.setSelectedIndex(0); updating = false; invalidateInputs();
     }

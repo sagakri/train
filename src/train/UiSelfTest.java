@@ -89,6 +89,47 @@ public final class UiSelfTest {
                 }
             });
             click("defaults");
+            // #ИзменяемоеНаправление: проверяем настоящий редактор станций и списка маршрутов.
+            JTable table = (JTable) field("trainTable");
+            edt(() -> {
+                trains.setValueAt("D-F-O-G-B", 0, 7);
+                check("Заданный".equals(trains.getValueAt(0, 8)), "Ручной маршрут фиксируется");
+                check(table.editCellAt(0, 1), "Редактор станции открывается");
+                JComboBox<?> editor = (JComboBox<?>) table.getEditorComponent();
+                editor.setSelectedItem("A");
+                if (table.isEditing()) table.getCellEditor().stopCellEditing();
+                check("A".equals(trains.getValueAt(0, 1)), "Станция отправления изменена");
+                check("".equals(trains.getValueAt(0, 7)) && "Авто".equals(trains.getValueAt(0, 8)), "Старый маршрут сброшен");
+                check(table.editCellAt(0, 7), "Редактор маршрута открывается");
+                JComboBox<?> routes = (JComboBox<?>) table.getEditorComponent();
+                boolean available = false;
+                for (int i = 0; i < routes.getItemCount(); i++) if ("A-E-G-B".equals(routes.getItemAt(i))) available = true;
+                check(available, "Список путей соответствует новым станциям");
+                routes.setSelectedItem("A-E-G-B");
+                if (table.isEditing()) table.getCellEditor().stopCellEditing();
+                check("Заданный".equals(trains.getValueAt(0, 8)), "Выбранный путь фиксируется");
+            });
+            click("auto"); awaitSearch();
+            edt(() -> {
+                try {
+                    Model.Plan plan = (Model.Plan) field("selected");
+                    check(plan.schedules().get(0).route().equals(List.of("A", "E", "G", "B")), "Поиск соблюдает выбранный путь");
+                    check(plan.schedules().get(0).train().from().equals("A"), "Поиск использует новую станцию");
+                    check(Scheduling.conflicts(plan.schedules(), 1).isEmpty(), "Изменённое расписание безопасно");
+                    table.setRowSelectionInterval(0, 0);
+                } catch (ReflectiveOperationException e) { throw new RuntimeException(e); }
+            });
+            click("reverse");
+            edt(() -> {
+                check("B".equals(trains.getValueAt(0, 1)) && "A".equals(trains.getValueAt(0, 2)), "Станции меняются местами");
+                check("B-G-E-A".equals(trains.getValueAt(0, 7)), "Заданный путь разворачивается");
+            });
+            click("auto"); awaitSearch();
+            edt(() -> {
+                try { check(((Model.Plan) field("selected")).schedules().get(0).route().equals(List.of("B", "G", "E", "A")), "Поиск соблюдает обратное направление"); }
+                catch (ReflectiveOperationException e) { throw new RuntimeException(e); }
+            });
+            click("defaults");
             System.out.println("OK: " + checks + " проверок интерфейса; рендер: java-desktop.png");
         } finally {
             if (frame != null) edt(frame::dispose);

@@ -103,6 +103,15 @@ public final class SelfTest {
         check(rejected, "NaN запрещён");
         near(TimeUtil.parse("01:41:12"), 6072, "Разбор времени");
         near(TimeUtil.parse("78,28"), 78.28, "Дробные секунды");
+        // #ФиксированныйПуть: поиск не заменяет указанный путь более коротким.
+        List<String> fixedRoute = List.of("D", "F", "E", "O", "G", "B");
+        SearchResult fixedSearch = Optimizer.search(config(original, true, false), Map.of(1, fixedRoute), p -> {});
+        check(fixedSearch.combinations() == 8 * 9 * 8, "Заданный путь ограничивает сочетания");
+        for (Plan p : fixedSearch.variants()) check(p.schedules().get(0).route().equals(fixedRoute), "Сохранение заданного маршрута");
+        boolean invalidRouteRejected = false;
+        try { Optimizer.search(original, Map.of(1, List.of("A", "E", "G", "B")), p -> {}); }
+        catch (IllegalArgumentException expectedError) { invalidRouteRejected = true; }
+        check(invalidRouteRejected, "Неверное направление заданного пути запрещено");
         check(original.trains().get(2).tanks() == 30, "Режим без вагонов не изменяет составы");
         System.out.println("OK: " + checks + " проверок пройдено.");
     }

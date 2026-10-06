@@ -54,6 +54,12 @@ public final class NetworkPanel extends JPanel {
             g.drawString(node, p.x - 6, p.y + 6);
         }
         if (plan != null) for (Schedule schedule : plan.schedules()) drawTrain(g, schedule);
+        // #Направления: подписи обновляются сразу после изменения станций поезда.
+        for (int i = 0; i < config.trains().size(); i++) {
+            Train train = config.trains().get(i);
+            g.setColor(COLORS[(train.id() - 1) % COLORS.length]);
+            g.drawString("№" + train.id() + " " + train.from() + " → " + train.to(), 60 + i * 175, 535);
+        }
         g.dispose();
     }
 

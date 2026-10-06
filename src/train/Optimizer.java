@@ -14,12 +14,19 @@ public final class Optimizer {
 
     // #ПоискВариантов: сохраняет до шести лучших сочетаний и отсекает их по нижней границе.
     public static SearchResult search(Config config, IntConsumer progress) {
+        return search(config, Map.of(), progress);
+    }
+
+    // #ЗаданныеМаршруты: выбранный пользователем путь фиксируется, остальные ищутся автоматически.
+    public static SearchResult search(Config config, Map<Integer, List<String>> chosenRoutes, IntConsumer progress) {
         Network.validate(config);
         Network network = new Network(config);
         List<List<List<String>>> sets = new ArrayList<>();
         int count = 1;
         for (Train train : config.trains()) {
-            List<List<String>> paths = network.paths(train.from(), train.to());
+            List<String> chosen = chosenRoutes.get(train.id());
+            if (chosen != null) network.validateRoute(train, chosen);
+            List<List<String>> paths = chosen == null ? network.paths(train.from(), train.to()) : List.of(List.copyOf(chosen));
             if (paths.isEmpty()) throw new IllegalArgumentException("Для поезда №" + train.id() + " нет пути.");
             sets.add(paths);
             count = Math.multiplyExact(count, paths.size());

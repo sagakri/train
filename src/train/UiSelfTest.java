@@ -53,9 +53,37 @@ public final class UiSelfTest {
         });
     }
 
+    // #ПроверкаАнимации: модельное время действительно меняется по событиям Swing Timer.
+    private static void assertPlaying() throws Exception {
+        javax.swing.Timer timer = (javax.swing.Timer) field("timer");
+        double[] before = {0}, after = {0};
+        edt(() -> {
+            check(timer.isRunning(), "Анимация запущена после подготовки плана");
+            try { before[0] = (Double) field("animationTime"); }
+            catch (ReflectiveOperationException e) { throw new RuntimeException(e); }
+        });
+        Thread.sleep(250);
+        edt(() -> {
+            try { after[0] = (Double) field("animationTime"); }
+            catch (ReflectiveOperationException e) { throw new RuntimeException(e); }
+            check(after[0] > before[0], "Время симуляции увеличивается");
+        });
+        click("pause");
+        edt(() -> check(!timer.isRunning(), "Пауза останавливает анимацию"));
+    }
+
     public static void main(String[] args) throws Exception {
         try {
             edt(() -> frame = new SimulatorFrame());
+            // #РегрессияКнопкиСтарт: расчёт заранее не вызывается, как при первом запуске пользователем.
+            click("play"); awaitSearch(); assertPlan(6072); assertPlaying();
+            click("defaults"); click("play"); awaitSearch(); assertPlan(6072); assertPlaying();
+            click("reset");
+            edt(() -> {
+                try { check((Double) field("animationTime") == 0, "Возврат к началу устанавливает нулевое время"); }
+                catch (ReflectiveOperationException e) { throw new RuntimeException(e); }
+            });
+            click("defaults");
             click("auto"); awaitSearch(); assertPlan(6072);
             JComboBox<?> variants = (JComboBox<?>) field("variants");
             edt(() -> { check(variants.getItemCount() == 6, "Выбор шести вариантов"); variants.setSelectedIndex(1); });

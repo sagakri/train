@@ -31,6 +31,7 @@ public final class SimulatorFrame extends JFrame {
     private final JButton auto = new JButton("Найти лучший график"), manual = new JButton("Проверить отправления"), cancel = new JButton("Отменить");
     private final JButton random = new JButton("Случайные данные"), defaults = new JButton("Исходные данные");
     private final JButton reverse = new JButton("Поменять направление выбранного поезда");
+    private final JButton play = new JButton("▶ Запустить симуляцию"), pause = new JButton("Пауза"), reset = new JButton("В начало");
     private final JLabel status = new JLabel("Готов к расчёту"), metrics = new JLabel("Освобождение: —"), clock = new JLabel("00:00:00");
     private final JLabel comparison = new JLabel("С вагонами: —   |   Без вагонов: —");
     private final JTextArea messages = new JTextArea(3, 60);
@@ -48,6 +49,7 @@ public final class SimulatorFrame extends JFrame {
     private SwingWorker<SearchResult, Void> worker;
     private boolean updating;
     private double animationTime;
+    private boolean playAfterSearch;
 
     public SimulatorFrame() {
         super("Симулятор движения поездов — Java");
@@ -76,7 +78,7 @@ public final class SimulatorFrame extends JFrame {
         drawing.add(network, BorderLayout.CENTER);
         JPanel transport = new JPanel(new BorderLayout());
         JPanel buttons = new JPanel(new FlowLayout(FlowLayout.LEFT));
-        JButton play = new JButton("▶"), pause = new JButton("Пауза"), reset = new JButton("В начало");
+        play.setToolTipText("Рассчитать безопасный график при необходимости и запустить движение");
         buttons.add(play); buttons.add(pause); buttons.add(reset); buttons.add(new JLabel("Скорость, мин/с")); buttons.add(rate); buttons.add(clock);
         transport.add(buttons, BorderLayout.NORTH); transport.add(slider, BorderLayout.SOUTH);
         drawing.add(transport, BorderLayout.SOUTH);
@@ -125,8 +127,9 @@ public final class SimulatorFrame extends JFrame {
         variants.addActionListener(e -> {
             if (!updating && variants.getSelectedIndex() >= 0 && variants.getSelectedIndex() < plans.size()) apply(plans.get(variants.getSelectedIndex()));
         });
-        play.addActionListener(e -> { if (selected != null) { if (animationTime >= selected.total()) showTime(0); timer.start(); } });
-        pause.addActionListener(e -> timer.stop()); reset.addActionListener(e -> { timer.stop(); showTime(0); });
+        play.addActionListener(e -> startPlayback());
+        pause.addActionListener(e -> { playAfterSearch = false; timer.stop(); });
+        reset.addActionListener(e -> { playAfterSearch = false; timer.stop(); showTime(0); });
         slider.addChangeListener(e -> { if (!updating) { timer.stop(); showTime(slider.getValue()); } });
         edges.addTableModelListener(e -> invalidateInputs()); trains.addTableModelListener(e -> trainChanged(e));
         withCars.addActionListener(e -> invalidateInputs()); routing.addActionListener(e -> invalidateInputs());
@@ -257,15 +260,22 @@ public final class SimulatorFrame extends JFrame {
 
     // #ФоновыйПоиск: SwingWorker выполняет тяжёлые вычисления вне потока интерфейса.
     private void startSearch() {
+        startSearch(false);
+    }
+
+    // #РасчётПередАнимацией: старт симуляции сначала строит план для текущих данных.
+    private void startSearch(boolean autoplay) {
         try {
             current = readConfig(true);
             Map<Integer, List<String>> routeChoices = chosenRoutes(current);
+            playAfterSearch = autoplay;
             timer.stop();
             selected = null; plans = List.of(); savedWaits = List.of();
             updating = true; variants.removeAllItems(); updating = false;
             summary.setRowCount(0); events.setRowCount(0); showTime(0);
             timeline.display(null);
-            Config snapshot = current; setBusy(true); progress.setValue(0); status.setText("Поиск безопасных расписаний…");
+            Config snapshot = current; setBusy(true); progress.setValue(0);
+            status.setText(autoplay ? "Подготовка симуляции: поиск безопасного графика…" : "Поиск безопасных расписаний…");
             worker = new SwingWorker<>() {
                 @Override protected SearchResult doInBackground() { return Optimizer.search(snapshot, routeChoices, this::setProgress); }
                 // #ЗавершениеПоиска: get извлекает результат или ошибку фоновой задачи.
@@ -281,6 +291,9 @@ public final class SimulatorFrame extends JFrame {
                             apply(plans.get(0)); updateComparison();
                         }
                         status.setText("Оценено сочетаний: " + result.combinations() + "; отсечено: " + result.bounded());
+                        if (playAfterSearch && selected != null) {
+                            timer.start(); status.setText("Симуляция запущена. Освобождение сети: " + TimeUtil.format(selected.total()));
+                        }
                     } catch (CancellationException e) {
                         status.setText("Расчёт отменён");
                     } catch (InterruptedException e) {
@@ -288,13 +301,13 @@ public final class SimulatorFrame extends JFrame {
                     } catch (ExecutionException e) {
                         showError(e.getCause());
                     } finally {
-                        updating = false; setBusy(false); worker = null;
+                        updating = false; playAfterSearch = false; setBusy(false); worker = null;
                     }
                 }
             };
             worker.addPropertyChangeListener(e -> { if ("progress".equals(e.getPropertyName())) progress.setValue((Integer) e.getNewValue()); });
             worker.execute();
-        } catch (IllegalArgumentException e) { showError(e); }
+        } catch (IllegalArgumentException e) { playAfterSearch = false; showError(e); }
     }
 
     // #РучнаяПроверка: использует введённые маршруты и времена, сохраняя ожидания выбранного плана.
@@ -370,6 +383,17 @@ public final class SimulatorFrame extends JFrame {
         animationTime = time; updating = true; slider.setValue((int) Math.round(time)); updating = false;
         clock.setText(TimeUtil.format(time)); network.display(current, selected, time);
     }
+
+    // #ЗапускДвижения: после открытия или изменения данных план рассчитывается автоматически.
+    private void startPlayback() {
+        if (worker != null) return;
+        // #ПодтверждениеЯчейки: незавершённое редактирование не должно запускать старый план.
+        try { current = readConfig(true); }
+        catch (IllegalArgumentException e) { showError(e); return; }
+        if (selected == null) { startSearch(true); return; }
+        if (animationTime >= selected.total()) showTime(0);
+        timer.start(); status.setText("Симуляция запущена");
+    }
     private void advanceAnimation() {
         if (selected == null) { timer.stop(); return; }
         double time = Math.min(selected.total(), animationTime + 0.04 * (Integer) rate.getSelectedItem() * 60);
@@ -378,7 +402,7 @@ public final class SimulatorFrame extends JFrame {
 
     // #БлокировкаВвода: параметры не меняются во время вычисления снимка данных.
     private void setBusy(boolean busy) {
-        for (Component c : new Component[]{auto, manual, random, defaults, reverse, withCars, routing, variants, edgeTable, trainTable, carLength, tankLength, gap}) c.setEnabled(!busy);
+        for (Component c : new Component[]{auto, manual, random, defaults, reverse, play, withCars, routing, variants, edgeTable, trainTable, carLength, tankLength, gap}) c.setEnabled(!busy);
         cancel.setEnabled(busy);
     }
 

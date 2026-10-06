@@ -5,6 +5,7 @@ import java.util.function.IntConsumer;
 import java.util.concurrent.CancellationException;
 import static train.Model.*;
 import static train.Scheduling.*;
+import train.PlanQuality.Score;
 
 // #Оптимизатор: полный перебор простых маршрутов и метод ветвей и границ для времени.
 public final class Optimizer {
@@ -32,6 +33,10 @@ public final class Optimizer {
             count = Math.multiplyExact(count, paths.size());
         }
         List<Plan> variants = new ArrayList<>();
+        Comparator<Plan> ranking = Comparator.comparing(p -> PlanQuality.score(config, p));
+        double lowerBound = 0;
+        for (int i = 0; i < sets.size(); i++) lowerBound = Math.max(lowerBound,
+            build(config, config.trains().get(i), sets.get(i).get(0), 0).complete());
         int bounded = 0;
         for (int index = 0; index < count; index++) {
             checkInterrupted();
@@ -44,24 +49,32 @@ public final class Optimizer {
             }
             List<Schedule> bases = new ArrayList<>();
             for (int i = 0; i < routes.size(); i++) bases.add(build(config, config.trains().get(i), routes.get(i), 0));
-            double ceiling = variants.size() >= 6 ? variants.get(5).total() : Double.POSITIVE_INFINITY;
+            double distance = routes.stream().mapToDouble(network::length).sum();
+            Score ceiling = variants.size() >= 6 ? PlanQuality.score(config, variants.get(5))
+                : new Score(Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY);
             Plan result = null;
-            if (plan(bases).total() < ceiling - EPS) result = solve(bases, config.gap(), config.stops(), ceiling);
+            // #БезопасноеОтсечение: равное время ещё может дать меньше ожидания или километров.
+            if (new Score(plan(bases).total(), 0, distance).compareTo(ceiling) < 0)
+                result = solveRanked(bases, config.gap(), config.stops(), ceiling, distance);
             if (result == null) bounded++;
             else {
                 if (!conflicts(result.schedules(), config.gap()).isEmpty()) throw new IllegalStateException("Проверка обнаружила конфликт в найденном графике.");
                 variants.add(result);
-                variants.sort(Comparator.comparingDouble(Plan::total));
+                variants.sort(ranking);
                 if (variants.size() > 6) variants.remove(6);
             }
             if (index % 32 == 0 || index == count - 1) progress.accept((index + 1) * 100 / count);
         }
-        variants.sort(Comparator.comparingDouble(Plan::total).thenComparingDouble(p -> p.schedules().stream().mapToDouble(Schedule::start).sum()));
-        return new SearchResult(List.copyOf(variants), count, bounded);
+        variants.sort(ranking);
+        return new SearchResult(List.copyOf(variants), count, bounded, lowerBound);
     }
 
     // #РешениеВремён: одна переменная отправления на поезд либо подробная модель остановок.
     public static Plan solve(List<Schedule> bases, double gap, boolean stops, double ceiling) {
+        return solveRanked(bases, gap, stops, new Score(ceiling, Double.POSITIVE_INFINITY, Double.POSITIVE_INFINITY), 0);
+    }
+
+    private static Plan solveRanked(List<Schedule> bases, double gap, boolean stops, Score ceiling, double distance) {
         List<Motion> models = stops ? bases.stream().map(Motion::new).toList() : List.of();
         List<Constraint> fixed = new ArrayList<>();
         List<TimedResource> resources = new ArrayList<>();
@@ -92,8 +105,9 @@ public final class Optimizer {
             if (a.interval().trainId() != b.interval().trainId() && a.interval().resource().equals(b.interval().resource())) pairs.add(new Pair(a, b));
         }
         double[] bestTimes = initial.stream().mapToDouble(Double::doubleValue).toArray();
-        double best = finish(bestTimes, completion, completionOffset);
-        if (best >= ceiling) { best = ceiling; bestTimes = null; }
+        double baselineSum = bases.stream().mapToDouble(Schedule::complete).sum();
+        Score best = quality(bestTimes, completion, completionOffset, baselineSum, distance);
+        if (best.compareTo(ceiling) >= 0) { best = ceiling; bestTimes = null; }
         Deque<List<Constraint>> stack = new ArrayDeque<>();
         stack.push(List.of());
         // #Ветвление: для каждого конфликта рассматриваем оба порядка доступа к ресурсу.
@@ -112,17 +126,17 @@ public final class Optimizer {
                     changed = true;
                 }
                 if (!changed) break;
-                if (pass == times.length - 1 || finish(times, completion, completionOffset) >= best - EPS) { feasible = false; break; }
+                if (pass == times.length - 1 || quality(times, completion, completionOffset, baselineSum, distance).compareTo(best) >= 0) { feasible = false; break; }
             }
-            double total = finish(times, completion, completionOffset);
-            if (!feasible || total >= best - EPS) continue;
+            Score candidate = quality(times, completion, completionOffset, baselineSum, distance);
+            if (!feasible || candidate.compareTo(best) >= 0) continue;
             Pair conflict = null;
             for (Pair p : pairs) {
                 TimedResource a = p.a(), b = p.b();
                 if (Math.max(times[a.startVar()] + a.startOffset(), times[b.startVar()] + b.startOffset()) <
                     Math.min(times[a.endVar()] + a.endOffset() + gap, times[b.endVar()] + b.endOffset() + gap) - EPS) { conflict = p; break; }
             }
-            if (conflict == null) { bestTimes = times; best = total; continue; }
+            if (conflict == null) { bestTimes = times; best = candidate; continue; }
             TimedResource a = conflict.a(), b = conflict.b();
             List<Constraint> reverse = new ArrayList<>(branch), forward = new ArrayList<>(branch);
             reverse.add(new Constraint(b.endVar(), a.startVar(), b.endOffset() + gap - a.startOffset()));
@@ -143,6 +157,14 @@ public final class Optimizer {
         double max = 0;
         for (int i = 0; i < completion.length; i++) max = Math.max(max, times[completion[i]] + offsets[i]);
         return max;
+    }
+
+    // #ГраницаОжиданий: выход хвоста минус чистое время движения равен отправлению плюс остановки.
+    // При распространении времён это нижняя граница: каждое время может только увеличиваться.
+    private static Score quality(double[] times, int[] completion, double[] offsets, double baselineSum, double distance) {
+        double sum = 0;
+        for (int i = 0; i < completion.length; i++) sum += times[completion[i]] + offsets[i];
+        return new Score(finish(times, completion, offsets), Math.max(0, sum - baselineSum), distance);
     }
 
     // #Сдвиг: в режиме без остановок все события сдвигаются на одно время отправления.

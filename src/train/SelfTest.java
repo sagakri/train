@@ -37,6 +37,11 @@ public final class SelfTest {
             check(result.combinations() == 5184, "Все сочетания рассмотрены");
             check(result.variants().size() == 6, "Шесть лучших вариантов");
             near(result.variants().get(0).total(), cars ? 6072 : 6000, "Контрольный оптимум");
+            near(result.lowerBound(), cars ? 6072 : 6000, "Нижняя граница исходной задачи");
+            for (int i = 1; i < result.variants().size(); i++) check(
+                PlanQuality.score(cfg, result.variants().get(i - 1)).compareTo(PlanQuality.score(cfg, result.variants().get(i))) <= 0,
+                "Варианты отсортированы по всем критериям");
+            if (cars && stops) near(PlanQuality.waiting(result.variants().get(0)), 43, "Минимальное ожидание при исходном оптимуме");
             for (Plan plan : result.variants()) {
                 check(conflicts(plan.schedules(), cfg.gap()).isEmpty(), "Найденный план безопасен");
                 for (Schedule schedule : plan.schedules()) {
@@ -74,22 +79,51 @@ public final class SelfTest {
             synthetic(3, 5, new String[]{"X"}, new double[]{1}, new double[]{5}));
         for (double gap : new double[]{0, 1, 2}) {
             double oracle = Double.POSITIVE_INFINITY;
+            double oracleWait = Double.POSITIVE_INFINITY;
             for (int a = 0; a <= 25; a++) for (int b = 0; b <= 25; b++) for (int c = 0; c <= 25; c++) {
                 List<Schedule> schedules = List.of(shift(small.get(0), a), shift(small.get(1), b), shift(small.get(2), c));
-                if (conflicts(schedules, gap).isEmpty()) oracle = Math.min(oracle, plan(schedules).total());
+                if (conflicts(schedules, gap).isEmpty()) {
+                    double total = plan(schedules).total(), waiting = a + b + c;
+                    if (total < oracle || total == oracle && waiting < oracleWait) { oracle = total; oracleWait = waiting; }
+                }
             }
             near(Optimizer.solve(small, gap, false, Double.POSITIVE_INFINITY).total(), oracle, "Оракул отправлений");
+            near(PlanQuality.waiting(Optimizer.solve(small, gap, false, Double.POSITIVE_INFINITY)), oracleWait, "Оракул минимального ожидания");
         }
         // #ОракулОстановок: перебор двух отправлений и двух ожиданий в малой встречной задаче.
         Train fast = new Train(1, "E", "O", 7200, 100, 0), opposite = new Train(99, "O", "E", 7200, 100, 0);
         List<Schedule> bases = List.of(build(original, fast, List.of("E", "F", "O"), 0), build(original, opposite, List.of("O", "F", "E"), 0));
         double oracle = Double.POSITIVE_INFINITY;
+        double oracleWait = Double.POSITIVE_INFINITY;
         for (int a = 0; a <= 8; a++) for (int b = 0; b <= 8; b++) for (int wa = 0; wa <= 8; wa++) for (int wb = 0; wb <= 8; wb++) {
             List<Schedule> trial = List.of(withWaits(build(original, fast, bases.get(0).route(), a), List.of(new Dwell("F", 0, wa))),
                 withWaits(build(original, opposite, bases.get(1).route(), b), List.of(new Dwell("F", 0, wb))));
-            if (conflicts(trial, 1).isEmpty()) oracle = Math.min(oracle, plan(trial).total());
+            if (conflicts(trial, 1).isEmpty()) {
+                double total = plan(trial).total(), waiting = a + b + wa + wb;
+                if (total < oracle || total == oracle && waiting < oracleWait) { oracle = total; oracleWait = waiting; }
+            }
         }
         near(Optimizer.solve(bases, 1, true, Double.POSITIVE_INFINITY).total(), oracle, "Оракул остановок");
+        near(PlanQuality.waiting(Optimizer.solve(bases, 1, true, Double.POSITIVE_INFINITY)), oracleWait, "Оракул ожиданий с остановками");
+
+        // #ОракулСочетаний: проверяем весь рейтинг маршрутов, включая третий критерий — километраж.
+        Config tiny = new Config(List.of(new Edge("E", "F", 2, true), new Edge("F", "O", 2, true), new Edge("E", "O", 2, true)),
+            List.of(fast, opposite), 20, 20, 1, true, false);
+        Network tinyGraph = new Network(tiny);
+        List<Plan> expectedPlans = new ArrayList<>();
+        for (List<String> aRoute : tinyGraph.paths("E", "O")) for (List<String> bRoute : tinyGraph.paths("O", "E")) {
+            Plan best = null;
+            for (int a = 0; a <= 12; a++) for (int b = 0; b <= 12; b++) {
+                Plan trial = plan(List.of(build(tiny, fast, aRoute, a), build(tiny, opposite, bRoute, b)));
+                if (conflicts(trial.schedules(), 1).isEmpty() && (best == null || PlanQuality.score(tiny, trial).compareTo(PlanQuality.score(tiny, best)) < 0)) best = trial;
+            }
+            expectedPlans.add(best);
+        }
+        expectedPlans.sort(Comparator.comparing(p -> PlanQuality.score(tiny, p)));
+        SearchResult tinyResult = Optimizer.search(tiny, p -> {});
+        check(tinyResult.variants().size() == 4, "Все четыре различные комбинации в малой сети");
+        for (int i = 0; i < 4; i++) check(PlanQuality.score(tiny, tinyResult.variants().get(i)).compareTo(PlanQuality.score(tiny, expectedPlans.get(i))) == 0,
+            "Рейтинг маршрутов совпадает с полным перебором");
 
         List<Edge> edited = new ArrayList<>(original.edges());
         for (int i = 0; i < edited.size(); i++) if (edited.get(i).key().equals("E-G")) edited.set(i, new Edge("E", "G", 3, true));

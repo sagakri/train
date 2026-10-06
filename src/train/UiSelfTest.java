@@ -85,6 +85,16 @@ public final class UiSelfTest {
             });
             click("defaults");
             click("auto"); awaitSearch(); assertPlan(6072);
+            edt(() -> {
+                try {
+                    DefaultTableModel ranked = (DefaultTableModel) field("alternatives");
+                    check(ranked.getRowCount() == 6, "Таблица лучших вариантов заполнена");
+                    check("43.00".equals(ranked.getValueAt(0, 2)), "Минимальное ожидание показано в таблице");
+                    check(((JLabel) field("proof")).getText().contains("Граница достигнута"), "Подтверждение нижней границей показано");
+                    ((JTable) field("alternativesTable")).setRowSelectionInterval(1, 1);
+                    check(((JComboBox<?>) field("variants")).getSelectedIndex() == 1, "Строка рейтинга выбирает соответствующее расписание");
+                } catch (ReflectiveOperationException e) { throw new RuntimeException(e); }
+            });
             JComboBox<?> variants = (JComboBox<?>) field("variants");
             edt(() -> { check(variants.getItemCount() == 6, "Выбор шести вариантов"); variants.setSelectedIndex(1); });
             assertPlan(6072); click("manual"); assertPlan(6072);
@@ -96,7 +106,9 @@ public final class UiSelfTest {
             edt(() -> routing.setSelectedIndex(1)); click("auto"); awaitSearch(); assertPlan(6000);
             click("defaults"); click("auto"); awaitSearch(); assertPlan(6072);
             // #Рендер: визуальная проверка выполняется без управления чужими окнами.
+            JTabbedPane tabs = (JTabbedPane) field("tabs");
             edt(() -> {
+                tabs.setSelectedIndex(tabs.indexOfTab("Лучшие варианты"));
                 frame.pack(); frame.setSize(1380, 900); frame.validate();
                 BufferedImage image = new BufferedImage(frame.getWidth(), frame.getHeight(), BufferedImage.TYPE_INT_RGB);
                 Graphics2D g = image.createGraphics(); frame.getContentPane().printAll(g); g.dispose();

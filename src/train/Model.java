@@ -27,7 +27,7 @@ public final class Model {
                            List<Segment> segments) {}
     // #План: сочетание расписаний и общий срок освобождения сети.
     public record Plan(List<Schedule> schedules, double total) {}
-    public record SearchResult(List<Plan> variants, int combinations, int bounded) {}
+    public record SearchResult(List<Plan> variants, int combinations, int bounded, double lowerBound) {}
 
     // #Настройки: снимок параметров расчёта; фоновой задаче передаются отдельные данные.
     public record Config(List<Edge> edges, List<Train> trains, double carLength,

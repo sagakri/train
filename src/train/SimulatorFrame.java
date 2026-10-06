@@ -22,6 +22,10 @@ public final class SimulatorFrame extends JFrame {
     };
     private final DefaultTableModel events = readOnly("Поезд", "Ресурс", "Событие", "Голова / начало", "Хвост / конец");
     private final DefaultTableModel summary = readOnly("Поезд", "Маршрут", "Отправление", "Прибытие", "Освобождение", "Ожидание у стрелок");
+    private final DefaultTableModel alternatives = readOnly("Место", "Освобождение, с", "Всё ожидание, с", "Путь, км", "Конфликты", "Маршруты поездов №1–4");
+    private final JLabel proof = new JLabel("Выполните поиск для сравнения вариантов.");
+    private final JTable alternativesTable = new JTable(alternatives);
+    private final JTabbedPane tabs = new JTabbedPane();
     private final JTable edgeTable = new JTable(edges), trainTable = new JTable(trains);
     private final JTextField carLength = new JTextField("20", 4), tankLength = new JTextField("20", 4), gap = new JTextField("1", 4);
     private final JTextField legend = new JTextField("ц = цистерны, в = вагоны", 22);
@@ -103,13 +107,27 @@ public final class SimulatorFrame extends JFrame {
         directionControls.add(new JLabel("Авто — поиск всех путей; Заданный — расчёт выбранного маршрута."));
         trainPanel.add(directionControls, BorderLayout.NORTH);
         trainPanel.add(new JScrollPane(trainTable));
-        JTabbedPane tabs = new JTabbedPane();
         tabs.addTab("Поезда", trainPanel);
         tabs.addTab("Расписание", new JScrollPane(new JTable(summary)));
+        // #СравнениеВариантов: одинаковое время не скрывает различия ожидания и километража.
+        alternativesTable.getColumnModel().getColumn(5).setPreferredWidth(500);
+        alternativesTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        alternativesTable.getSelectionModel().addListSelectionListener(e -> {
+            int row = alternativesTable.getSelectedRow();
+            if (!e.getValueIsAdjusting() && !updating && row >= 0 && row < plans.size()) variants.setSelectedIndex(row);
+        });
+        JPanel comparisonPanel = new JPanel(new BorderLayout());
+        comparisonPanel.add(proof, BorderLayout.NORTH);
+        comparisonPanel.add(new JScrollPane(alternativesTable), BorderLayout.CENTER);
+        tabs.addTab("Лучшие варианты", comparisonPanel);
         tabs.addTab("График времени", new JScrollPane(timeline));
         tabs.addTab("События", new JScrollPane(new JTable(events)));
         messages.setEditable(false); messages.setLineWrap(true); messages.setWrapStyleWord(true);
         tabs.addTab("Проверка / конфликты", new JScrollPane(messages));
+        JTextArea rules = new JTextArea(ProjectRules.TEXT);
+        rules.setEditable(false); rules.setLineWrap(true); rules.setWrapStyleWord(true);
+        rules.setMargin(new Insets(12, 12, 12, 12)); rules.setCaretPosition(0);
+        tabs.addTab("Условия и логика", new JScrollPane(rules));
         JPanel bottom = new JPanel(new BorderLayout());
         JPanel choice = new JPanel(new FlowLayout(FlowLayout.LEFT));
         choice.add(new JLabel("Расчётный вариант:")); choice.add(variants);
@@ -222,6 +240,7 @@ public final class SimulatorFrame extends JFrame {
         timer.stop(); selected = null; plans = List.of(); savedWaits = List.of();
         updating = true; variants.removeAllItems(); updating = false;
         summary.setRowCount(0); events.setRowCount(0); messages.setText("");
+        alternatives.setRowCount(0); proof.setText("Параметры изменены. Требуется новый поиск.");
         timeline.display(null);
         metrics.setText("Параметры изменены — требуется расчёт."); status.setText("Параметры изменены");
         showTime(0);
@@ -273,6 +292,7 @@ public final class SimulatorFrame extends JFrame {
             selected = null; plans = List.of(); savedWaits = List.of();
             updating = true; variants.removeAllItems(); updating = false;
             summary.setRowCount(0); events.setRowCount(0); showTime(0);
+            alternatives.setRowCount(0); proof.setText("Идёт поиск. Результат будет доступен после завершения.");
             timeline.display(null);
             Config snapshot = current; setBusy(true); progress.setValue(0);
             status.setText(autoplay ? "Подготовка симуляции: поиск безопасного графика…" : "Поиск безопасных расписаний…");
@@ -283,7 +303,17 @@ public final class SimulatorFrame extends JFrame {
                     try {
                         SearchResult result = get(); plans = result.variants();
                         updating = true; variants.removeAllItems();
-                        for (int i = 0; i < plans.size(); i++) variants.addItem("Вариант " + (i + 1) + " · " + TimeUtil.format(plans.get(i).total()));
+                        for (int i = 0; i < plans.size(); i++) {
+                            Plan p = plans.get(i);
+                            PlanQuality.Score quality = PlanQuality.score(current, p);
+                            variants.addItem("№" + (i + 1) + " · " + TimeUtil.format(p.total()) + " · ожидание " + TimeUtil.format(quality.waiting()));
+                            alternatives.addRow(new Object[]{i + 1, metric(quality.total()), metric(quality.waiting()), metric(quality.distance()),
+                                conflicts(p.schedules(), current.gap()).size(), String.join("; ", p.schedules().stream().map(s -> String.join("-", s.route())).toList())});
+                        }
+                        if (!plans.isEmpty()) proof.setText("Лучший: " + metric(plans.get(0).total()) + " с. Нижняя граница: "
+                            + metric(result.lowerBound()) + " с. " + (Math.abs(plans.get(0).total() - result.lowerBound()) < 1e-6
+                            ? "Граница достигнута." : "Оптимум подтверждён завершённым поиском.")
+                            + " Порядок: время → ожидание → километраж.");
                         updating = false;
                         if (!plans.isEmpty()) {
                             double[] pair = comparisons.computeIfAbsent(comparisonKey(), k -> new double[]{Double.NaN, Double.NaN});
@@ -295,10 +325,12 @@ public final class SimulatorFrame extends JFrame {
                             timer.start(); status.setText("Симуляция запущена. Освобождение сети: " + TimeUtil.format(selected.total()));
                         }
                     } catch (CancellationException e) {
+                        proof.setText("Поиск отменён. Оптимальность не установлена.");
                         status.setText("Расчёт отменён");
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt(); status.setText("Расчёт прерван");
                     } catch (ExecutionException e) {
+                        proof.setText("Поиск завершился ошибкой. Оптимальность не установлена.");
                         showError(e.getCause());
                     } finally {
                         updating = false; playAfterSearch = false; setBusy(false); worker = null;
@@ -363,10 +395,15 @@ public final class SimulatorFrame extends JFrame {
         for (Interval i : intervals) events.addRow(new Object[]{i.trainId(), i.resource(), i.edge() ? "Занятие / освобождение участка" : "Проход / освобождение узла", TimeUtil.format(i.start()), TimeUtil.format(i.end())});
         for (Schedule s : plan.schedules()) for (Dwell d : s.dwells()) events.addRow(new Object[]{s.train().id(), d.node(), "Ожидание у стрелки", TimeUtil.format(d.start()), TimeUtil.format(d.end())});
         StringBuilder report = new StringBuilder(conflicts.isEmpty() ? "Конфликтов нет.\n" : "Обнаружены конфликты:\n");
+        PlanQuality.Score quality = PlanQuality.score(current, plan);
+        report.append("Показатели: освобождение ").append(metric(quality.total())).append(" с; всё ожидание ")
+            .append(metric(quality.waiting())).append(" с; общий путь ").append(metric(quality.distance())).append(" км.\n");
         for (Conflict c : conflicts) report.append(c.resource()).append(": №").append(c.first()).append(" и №").append(c.second()).append(" ").append(TimeUtil.format(c.start())).append("–").append(TimeUtil.format(c.end())).append('\n');
         for (Schedule s : plan.schedules()) report.append("№").append(s.train().id()).append(": длина ").append(current.length(s.train())).append(" м; освобождение сети ").append(TimeUtil.exact(s.complete())).append(" с.\n");
         messages.setText(report.toString()); updating = true; slider.setMaximum((int) Math.ceil(plan.total())); updating = false; showTime(0);
     }
+
+    private static String metric(double value) { return String.format(Locale.ROOT, "%.2f", value); }
 
     // #СравнениеРежимов: ключ исключает ручные отправления, но учитывает физические параметры.
     private String comparisonKey() {
